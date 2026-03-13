@@ -1,0 +1,2 @@
+# astrbot_plugin_maibot
+将maibot作为agent执行器接入astrbot并拥有astrbot全部函数工具的调用能力，成为既拟人又功能性强的超级bot
