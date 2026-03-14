@@ -62,6 +62,8 @@ class MaiBotAgentRunner(BaseAgentRunner[TContext]):
         self.api_key = provider_config.get("maibot_api_key", "")
         self.platform = provider_config.get("maibot_platform", DEFAULT_PLATFORM)
         self.timeout = provider_config.get("timeout", DEFAULT_TIMEOUT)
+        self.bot_user_id = provider_config.get("maibot_bot_qq", "")
+        self.bot_nickname = provider_config.get("maibot_bot_nickname", "")
 
         if isinstance(self.timeout, str):
             self.timeout = int(self.timeout)
@@ -87,6 +89,8 @@ class MaiBotAgentRunner(BaseAgentRunner[TContext]):
                 api_key=self.api_key,
                 platform=self.platform,
                 timeout=self.timeout,
+                bot_user_id=self.bot_user_id,
+                bot_nickname=self.bot_nickname,
             )
             MaiBotAgentRunner._ws_clients[client_key] = self.ws_client
             logger.info("[MaiBot] Created new persistent WS client.")
@@ -132,6 +136,40 @@ class MaiBotAgentRunner(BaseAgentRunner[TContext]):
             async for resp in self.step():
                 yield resp
 
+    @staticmethod
+    def _parse_umo(umo: str) -> tuple[str, str, str]:
+        """Parse a Unified Message Origin string.
+
+        Format: "platform:MessageType:session_id"
+        e.g. "qq:GroupMessage:123456" or "qq:FriendMessage:user789"
+
+        Returns: (platform_name, message_type, session_id)
+        """
+        parts = umo.split(":", 2)
+        if len(parts) >= 3:
+            return parts[0], parts[1], parts[2]
+        elif len(parts) == 2:
+            return parts[0], parts[1], ""
+        return umo, "", ""
+
+    def _extract_sender_info(self) -> tuple[str, str]:
+        """Extract sender user_id and nickname from the run context event.
+
+        Returns: (sender_user_id, sender_nickname)
+        """
+        try:
+            ctx = getattr(self.run_context, "context", None)
+            if ctx:
+                event = getattr(ctx, "event", None)
+                if event:
+                    # AstrMessageEvent has sender_id / nickname
+                    sender_id = getattr(event, "sender_id", "") or ""
+                    nickname = getattr(event, "nickname", "") or ""
+                    return sender_id, nickname
+        except Exception:
+            pass
+        return "", ""
+
     async def _execute_maibot_request(self):
         """Core logic: send request to MaiBot and process the response."""
         prompt = self.req.prompt or ""
@@ -149,27 +187,71 @@ class MaiBotAgentRunner(BaseAgentRunner[TContext]):
             )
             return
 
+        # Parse UMO to determine group/private chat
+        # session_id = event.unified_msg_origin, e.g. "qq:GroupMessage:123456"
+        platform_name, message_type, raw_session_id = self._parse_umo(session_id)
+        is_group = "Group" in message_type
+
+        # Extract real sender info from event
+        sender_user_id, sender_nickname = self._extract_sender_info()
+        if not sender_user_id:
+            sender_user_id = raw_session_id or session_id
+        if not sender_nickname:
+            sender_nickname = sender_user_id
+
+        # For group chat: group_id = UMO (so we can recover it from replies)
+        #                  user_id = real sender
+        # For private:     group_id = None
+        #                  user_id = UMO (so we can recover it from replies)
+        if is_group:
+            ws_user_id = sender_user_id
+            ws_user_nickname = sender_nickname
+            ws_group_id = session_id  # full UMO as group_id
+            ws_group_name = raw_session_id
+        else:
+            ws_user_id = session_id  # full UMO as user_id
+            ws_user_nickname = sender_nickname or session_id
+            ws_group_id = None
+            ws_group_name = ""
+
         logger.info(
             f"[MaiBot] Sending to MaiBot: '{prompt[:100]}...' "
-            f"(session={session_id}, images={len(image_urls)})"
+            f"(umo={session_id}, is_group={is_group}, "
+            f"user={ws_user_id}, group={ws_group_id}, images={len(image_urls)})"
         )
 
-        # Send message and wait for response segments
-        response_segments = await self.ws_client.send_and_receive(
+        # Send message and wait for response segments.
+        # Note: the passthrough handler may have already sent this message
+        # for context, but send_and_receive uses a unique message_id so
+        # MaiBot treats it as a separate interaction and responds to it.
+        response_payloads = await self.ws_client.send_and_receive(
             text=prompt,
-            user_id=session_id,
-            user_nickname=session_id,
+            user_id=ws_user_id,
+            user_nickname=ws_user_nickname,
+            group_id=ws_group_id,
+            group_name=ws_group_name,
             images=image_urls if image_urls else None,
         )
 
         logger.info(
-            f"[MaiBot] Received {len(response_segments)} segment(s)"
+            f"[MaiBot] Received {len(response_payloads)} response payload(s)"
         )
 
-        # Each segment becomes a separate Comp.Plain in the chain.
-        # AstrBot's respond stage sends each component individually
-        # with natural delays, achieving the multi-message effect.
-        chain_components = [Comp.Plain(seg) for seg in response_segments]
+        # Convert MaiBot payloads to AstrBot message components
+        # Each payload may contain text, images, or seglist
+        chain_components = []
+        for payload in response_payloads:
+            segment = payload.get("message_segment", {})
+            components = self._parse_segment_to_components(segment)
+            chain_components.extend(components)
+
+        if not chain_components:
+            # Fallback: if parsing produced nothing, extract text as before
+            for payload in response_payloads:
+                text = self.ws_client._extract_text_from_payload(payload)
+                if text:
+                    chain_components.append(Comp.Plain(text))
+
         chain = MessageChain(chain=chain_components)
 
         self.final_llm_resp = LLMResponse(role="assistant", result_chain=chain)
@@ -184,6 +266,38 @@ class MaiBotAgentRunner(BaseAgentRunner[TContext]):
             type="llm_result",
             data=AgentResponseData(chain=chain),
         )
+
+    # ─── Segment Parsing ─────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_segment_to_components(segment: dict) -> list:
+        """Convert MaiBot Seg to AstrBot message components.
+
+        Handles: text, image (base64), emoji (base64), seglist (recursive).
+        """
+        result = []
+        seg_type = segment.get("type", "")
+        data = segment.get("data")
+
+        if seg_type == "text" and isinstance(data, str) and data.strip():
+            result.append(Comp.Plain(data))
+        elif seg_type in ("image", "emoji") and isinstance(data, str) and data:
+            b64 = data
+            for prefix in ("data:image/png;base64,", "data:image/gif;base64,",
+                           "data:image/jpeg;base64,", "data:image/webp;base64,"):
+                if b64.startswith(prefix):
+                    b64 = b64[len(prefix):]
+                    break
+            result.append(Comp.Image.fromBase64(b64))
+        elif seg_type == "imageurl" and isinstance(data, str) and data:
+            result.append(Comp.Image.fromURL(data))
+        elif seg_type == "seglist" and isinstance(data, list):
+            for sub_seg in data:
+                if isinstance(sub_seg, dict):
+                    result.extend(
+                        MaiBotAgentRunner._parse_segment_to_components(sub_seg)
+                    )
+        return result
 
     # ─── Tool Injection ──────────────────────────────────────────────
 

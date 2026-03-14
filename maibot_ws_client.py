@@ -24,12 +24,16 @@ class MaiBotWSClient:
         platform: str = "astrbot",
         timeout: int = 120,
         keepalive_interval: int = 20,
+        bot_user_id: str = "",
+        bot_nickname: str = "",
     ):
         self.ws_url = ws_url.rstrip("/")
         self.api_key = api_key
         self.platform = platform
         self.timeout = timeout
         self.keepalive_interval = keepalive_interval
+        self.bot_user_id = bot_user_id or "astrbot"
+        self.bot_nickname = bot_nickname or "AstrBot"
 
         self._ws = None
         self._listener_task: asyncio.Task | None = None
@@ -42,6 +46,10 @@ class MaiBotWSClient:
         # Tool injection support
         self._tool_call_handler: Callable[..., Awaitable[str]] | None = None
         self._tool_call_futures: dict[str, asyncio.Future] = {}
+
+        # Proactive message support
+        self._proactive_message_handler: Callable[..., Awaitable[None]] | None = None
+        self._in_request: bool = False
 
     def _build_connect_url(self) -> str:
         """Build WS URL with api_key and platform query params.
@@ -150,8 +158,19 @@ class MaiBotWSClient:
                     continue
 
                 if msg_type == "sys_std":
-                    # Put into global queue for any waiting caller
-                    await self._global_queue.put(msg)
+                    if self._in_request:
+                        # During active request-response, queue for _collect_response
+                        await self._global_queue.put(msg)
+                    elif self._proactive_message_handler:
+                        # Idle: this is a proactive message from MaiBot
+                        logger.info("[MaiBot] 收到主动消息，分派到主动消息处理器")
+                        asyncio.create_task(
+                            self._safe_proactive_handler(msg)
+                        )
+                    else:
+                        logger.debug(
+                            "[MaiBot] 收到主动消息但未注册处理器，丢弃"
+                        )
                 else:
                     logger.debug(f"[MaiBot] Unknown message type: {msg_type}")
         except asyncio.CancelledError:
@@ -228,6 +247,11 @@ class MaiBotWSClient:
                 "platform": self.platform,
                 "message_id": message_id,
                 "time": time.time(),
+                "user_info": {
+                    "platform": self.platform,
+                    "user_id": self.bot_user_id,
+                    "user_nickname": self.bot_nickname,
+                },
                 "sender_info": sender_info,
                 "format_info": format_info,
             },
@@ -247,10 +271,11 @@ class MaiBotWSClient:
         group_id: str | None = None,
         group_name: str = "",
         images: list[str] | None = None,
-    ) -> list[str]:
+    ) -> list[dict]:
         """Send a message to MaiBot and wait for the response.
 
-        Returns a list of text segments (one per MaiBot reply message).
+        Returns a list of payload dicts (one per MaiBot reply message).
+        Each payload contains message_segment, message_info, etc.
         Maintains a persistent connection so MaiBot can route
         the response back to us.
         """
@@ -266,6 +291,7 @@ class MaiBotWSClient:
         )
         envelope = self._build_envelope(payload)
 
+        self._in_request = True
         try:
             await self._ws.send(json.dumps(envelope, ensure_ascii=False))
             logger.debug("[MaiBot] Message sent, waiting for response ...")
@@ -278,7 +304,7 @@ class MaiBotWSClient:
                     break
 
             # Wait for response(s) from MaiBot
-            return await self._collect_response()
+            return await self._collect_response_payloads()
 
         except websockets.exceptions.ConnectionClosed as e:
             self._connected = False
@@ -289,10 +315,51 @@ class MaiBotWSClient:
             )
         except Exception as e:
             raise Exception(f"MaiBot communication error: {e}")
+        finally:
+            self._in_request = False
 
-    async def _collect_response(self) -> list[str]:
-        """Collect response messages from MaiBot via the global queue."""
-        collected_text_parts: list[str] = []
+    async def send_only(
+        self,
+        text: str,
+        user_id: str,
+        user_nickname: str = "",
+        group_id: str | None = None,
+        group_name: str = "",
+        images: list[str] | None = None,
+    ) -> None:
+        """Send a message to MaiBot without waiting for a response.
+
+        Used for transparent message passthrough so MaiBot can see all
+        messages in a chat stream for context-building and proactive replies.
+        """
+        try:
+            await self.ensure_connected()
+        except Exception as e:
+            logger.debug(f"[MaiBot] send_only: 连接失败，跳过透传: {e}")
+            return
+
+        payload = self._build_message_payload(
+            text=text,
+            user_id=user_id,
+            user_nickname=user_nickname,
+            group_id=group_id,
+            group_name=group_name,
+            images=images,
+        )
+        envelope = self._build_envelope(payload)
+
+        try:
+            await self._ws.send(json.dumps(envelope, ensure_ascii=False))
+            logger.debug(f"[MaiBot] 透传消息已发送: user={user_id}, group={group_id}")
+        except Exception as e:
+            logger.debug(f"[MaiBot] 透传消息发送失败: {e}")
+
+    async def _collect_response_payloads(self) -> list[dict]:
+        """Collect response message payloads from MaiBot via the global queue.
+
+        Returns raw payload dicts so the caller can extract text, images, etc.
+        """
+        collected_payloads: list[dict] = []
         deadline = time.time() + self.timeout
 
         while time.time() < deadline:
@@ -308,28 +375,46 @@ class MaiBotWSClient:
                 break
 
             payload = msg.get("payload", {})
-            text = self._extract_text_from_payload(payload)
-            if text:
-                collected_text_parts.append(text)
+            segment = payload.get("message_segment", {})
+            # Check if payload has any meaningful content
+            if self._segment_has_content(segment):
+                collected_payloads.append(payload)
                 # Wait briefly for follow-up messages
                 try:
                     while True:
                         msg2 = await asyncio.wait_for(
                             self._global_queue.get(), timeout=5.0
                         )
-                        t2 = self._extract_text_from_payload(msg2.get("payload", {}))
-                        if t2:
-                            collected_text_parts.append(t2)
+                        p2 = msg2.get("payload", {})
+                        s2 = p2.get("message_segment", {})
+                        if self._segment_has_content(s2):
+                            collected_payloads.append(p2)
                 except asyncio.TimeoutError:
                     pass
                 break
 
-        if collected_text_parts:
-            return collected_text_parts
+        if collected_payloads:
+            return collected_payloads
 
         raise asyncio.TimeoutError(
             f"MaiBot did not send a meaningful response within {self.timeout}s."
         )
+
+    def _segment_has_content(self, segment: dict) -> bool:
+        """Check if a Seg has any meaningful content (text, image, etc)."""
+        seg_type = segment.get("type", "")
+        data = segment.get("data")
+        if seg_type == "text" and isinstance(data, str) and data.strip():
+            return True
+        if seg_type in ("image", "emoji", "imageurl") and data:
+            return True
+        if seg_type == "seglist" and isinstance(data, list):
+            return any(
+                self._segment_has_content(sub)
+                for sub in data
+                if isinstance(sub, dict)
+            )
+        return False
 
     def _extract_text_from_payload(self, payload: dict) -> str:
         """Extract text content from a maim_message payload."""
@@ -359,6 +444,24 @@ class MaiBotWSClient:
             return "[视频]"
 
         return ""
+
+    def set_proactive_message_handler(
+        self, handler: Callable[..., Awaitable[None]] | None
+    ) -> None:
+        """Register a callback for handling proactive messages from MaiBot.
+
+        The handler signature: async (msg: dict) -> None
+        where msg is the raw sys_std envelope dict.
+        """
+        self._proactive_message_handler = handler
+
+    async def _safe_proactive_handler(self, msg: dict) -> None:
+        """Wrapper to catch errors in the proactive message handler."""
+        try:
+            if self._proactive_message_handler:
+                await self._proactive_message_handler(msg)
+        except Exception as e:
+            logger.error(f"[MaiBot] 主动消息处理出错: {e}", exc_info=True)
 
     # ─── Tool Injection Protocol ──────────────────────────────────────
 
