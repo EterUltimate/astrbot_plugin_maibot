@@ -1,6 +1,4 @@
 import asyncio
-import json
-import time
 import uuid
 
 from astrbot.api import logger, star
@@ -8,19 +6,13 @@ from astrbot.core.platform import Platform, PlatformMetadata
 from astrbot.core.platform.register import register_platform_adapter
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.astrbot_message import AstrBotMessage, Group, MessageMember
-from astrbot.core.platform.message_session import MessageSession, MessageType
+from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.message_type import MessageType as MT
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.message.components import Plain, Image
-from astrbot.core.star.register import register_regex
 from astrbot.core.provider.register import llm_tools
 
-from .maibot_agent_runner import (
-    DEFAULT_PLATFORM,
-    DEFAULT_TIMEOUT,
-    DEFAULT_WS_URL,
-    MaiBotAgentRunner,
-)
+from .maibot_agent_runner import DEFAULT_PLATFORM, DEFAULT_TIMEOUT, DEFAULT_WS_URL
 from .maibot_ws_client import MaiBotWSClient
 
 MAIBOT_CONFIG_METADATA = {
