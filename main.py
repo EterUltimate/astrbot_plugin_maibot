@@ -1,21 +1,11 @@
 import asyncio
 
 from astrbot.api import logger, star
-from astrbot.core import astrbot_config
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
-from astrbot.core.provider.register import (
-    register_provider_adapter,
-)
-from astrbot.core.provider.entities import (
-    LLMResponse,
-    ProviderType,
-    ToolCallsResult,
-)
+from astrbot.core.provider.register import register_provider_adapter
+from astrbot.core.provider.entities import LLMResponse, ProviderType
 from astrbot.core.provider.provider import Provider
-from astrbot.core.agent.runners.base import AgentState, BaseAgentRunner
-from astrbot.core.agent.response import AgentResponse, AgentResponseData
-from astrbot.core.agent.run_context import ContextWrapper
-from astrbot.core.star.register import register_regex
+from astrbot.core.star.register import register_regex, register_on_astrbot_loaded
 import astrbot.core.message.components as Comp
 from astrbot.core.message.message_event_result import MessageChain
 
@@ -29,22 +19,6 @@ from .maibot_agent_runner import (
 from .maibot_ws_client import MaiBotWSClient
 
 
-@register_provider_adapter(
-    MAIBOT_PROVIDER_TYPE,
-    "MaiBot - 通过 WebSocket 连接 MaiBot API-Server，替代 AstrBot 内置 LLM Agent",
-    provider_type=ProviderType.CHAT_COMPLETION,
-    default_config_tmpl={
-        "type": MAIBOT_PROVIDER_TYPE,
-        "enable": False,
-        "id": "maibot_default",
-        "maibot_ws_url": DEFAULT_WS_URL,
-        "maibot_api_key": "",
-        "maibot_platform": DEFAULT_PLATFORM,
-        "maibot_bot_qq": "",
-        "maibot_bot_nickname": "",
-    },
-    provider_display_name="MaiBot",
-)
 class MaiBotProvider(Provider):
     """AstrBot Provider that bridges to MaiBot via WebSocket.
 
@@ -57,18 +31,41 @@ class MaiBotProvider(Provider):
     def __init__(self, provider_config: dict, provider_settings: dict) -> None:
         super().__init__(provider_config, provider_settings)
 
-        self.ws_url = provider_config.get("maibot_ws_url", DEFAULT_WS_URL)
-        self.api_key = provider_config.get("maibot_api_key", "")
-        self.platform = provider_config.get("maibot_platform", DEFAULT_PLATFORM)
-        self.timeout = provider_config.get("timeout", DEFAULT_TIMEOUT)
-        self.bot_user_id = provider_config.get("maibot_bot_qq", "")
-        self.bot_nickname = provider_config.get("maibot_bot_nickname", "")
+        self.ws_url = DEFAULT_WS_URL
+        self.api_key = ""
+        self.platform = DEFAULT_PLATFORM
+        self.timeout = DEFAULT_TIMEOUT
+        self.bot_user_id = ""
+        self.bot_nickname = ""
+
+        self.ws_client: MaiBotWSClient | None = None
+
+    def configure(self, config: dict) -> None:
+        """Apply plugin config from _conf_schema.json."""
+        self.ws_url = config.get("maibot_ws_url", DEFAULT_WS_URL)
+        self.api_key = config.get("maibot_api_key", "")
+        self.platform = config.get("maibot_platform", DEFAULT_PLATFORM)
+        self.timeout = config.get("maibot_timeout", DEFAULT_TIMEOUT)
+        self.bot_user_id = config.get("maibot_bot_qq", "")
+        self.bot_nickname = config.get("maibot_bot_nickname", "")
 
         if isinstance(self.timeout, str):
             self.timeout = int(self.timeout)
 
-        self.ws_client: MaiBotWSClient | None = None
-        self._initialized = False
+        # Reset client so it picks up new config
+        if self.ws_client:
+            try:
+                asyncio.get_event_loop().run_until_complete(
+                    self.ws_client.close()
+                )
+            except Exception:
+                pass
+            self.ws_client = None
+
+        logger.info(
+            f"[MaiBot] Provider configured: ws_url={self.ws_url}, "
+            f"platform={self.platform}, timeout={self.timeout}"
+        )
 
     async def _ensure_client(self) -> MaiBotWSClient:
         """Lazily create or reuse the WebSocket client."""
@@ -115,7 +112,7 @@ class MaiBotProvider(Provider):
         if not self.api_key:
             return LLMResponse(
                 role="assistant",
-                completion_text="[MaiBot] 未配置 API Key，请在 AstrBot 配置中填写 MaiBot 的 API Key。",
+                completion_text="[MaiBot] 未配置 API Key，请在插件配置中填写 MaiBot 的 API Key。",
             )
 
         try:
@@ -171,11 +168,42 @@ class MaiBotProvider(Provider):
             )
 
 
+@register_provider_adapter(
+    MAIBOT_PROVIDER_TYPE,
+    "MaiBot - 通过 WebSocket 连接 MaiBot API-Server，替代 AstrBot 内置 LLM Agent",
+    provider_type=ProviderType.CHAT_COMPLETION,
+    default_config_tmpl={
+        "type": MAIBOT_PROVIDER_TYPE,
+        "enable": False,
+        "id": "maibot_default",
+    },
+    provider_display_name="MaiBot",
+)
+class MaiBotProviderEntry(MaiBotProvider):
+    """Thin wrapper just for registration — real config comes from _conf_schema.json."""
+    pass
+
+
 class Main(star.Star):
-    def __init__(self, context: star.Context) -> None:
+    def __init__(self, context: star.Context, config=None) -> None:
         super().__init__(context)
         self.context = context
+        self.config = config
         logger.info("[MaiBot Plugin] MaiBot provider registered.")
+
+    @register_on_astrbot_loaded
+    async def _on_loaded(self) -> None:
+        """Apply plugin config to MaiBotProvider after all providers are loaded."""
+        if not self.config:
+            return
+        try:
+            provider_manager = self.context.provider_manager
+            for inst_id, inst in provider_manager.inst_map.items():
+                if isinstance(inst, MaiBotProvider):
+                    inst.configure(self.config)
+                    logger.info(f"[MaiBot] Config applied to provider instance: {inst_id}")
+        except Exception as e:
+            logger.error(f"[MaiBot] Failed to apply config: {e}", exc_info=True)
 
     @register_regex(".*")
     async def _passthrough_to_maibot(self, event: AstrMessageEvent):
@@ -243,10 +271,9 @@ class Main(star.Star):
         """Try to get an active MaiBot WS client from provider instances."""
         try:
             provider_manager = self.context.provider_manager
-            for inst_id, inst_info in provider_manager._inst_map.items():
-                prov = inst_info.get("inst")
-                if prov and isinstance(prov, MaiBotProvider) and prov.ws_client:
-                    return prov.ws_client
+            for inst_id, inst in provider_manager.inst_map.items():
+                if isinstance(inst, MaiBotProvider) and inst.ws_client:
+                    return inst.ws_client
         except Exception:
             pass
         return None
