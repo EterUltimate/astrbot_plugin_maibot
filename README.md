@@ -1,4 +1,6 @@
 # AstrBot Plugin: MaiBot Platform Adapter
+<img width="768" height="1364" alt="1773902773512" src="https://github.com/user-attachments/assets/2a150120-20d4-41d5-b066-a68f18ca596d" />
+
 
 将 [MaiBot](https://github.com/MaiM-with-u/MaiBot) 作为 AstrBot 的消息平台适配器，通过 WebSocket 连接 MaiBot API-Server，将 MaiBot 的主动回复和工具调用桥接到 AstrBot 事件流水线。
 
