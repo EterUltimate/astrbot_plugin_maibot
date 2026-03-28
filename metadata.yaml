@@ -1,11 +1,6 @@
 name: astrbot_plugin_maibot_hijack
 display_name: MaiBot Adapter
-desc: |
-  将 AstrBot 作为消息聚合平台接入 MaiBot。
-  AstrBot 负责多平台消息收发（QQ/Telegram/Discord 等），
-  MaiBot 专注于 LLM 回复。
-  消息的 platform 字段自动从 AstrBot 的 unified_msg_origin 提取，
-  每个消息平台对应独立的 MaiBot WS 通道，实现真正的多平台透明路由。
+desc: 将 AstrBot 作为消息聚合平台接入 MaiBot
 author: EterUltimate
 repo: "https://github.com/EterUltimate/astrbot_plugin_maibot_hijack"
 version: 2.0.0
