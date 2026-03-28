@@ -31,8 +31,8 @@ from astrbot.core.message.components import Image
 
 from .maibot_ws_client import MaiBotWSClient, parse_segment_to_components
 
-# session_map 最大条目数，防止内存无限增长
-_SESSION_MAP_MAX = 500
+# 默认 session_map 最大条目数，可通过配置覆盖
+_DEFAULT_SESSION_MAP_MAX = 500
 
 
 # ---------------------------------------------------------------------------
@@ -84,11 +84,23 @@ class MaiBotHijackPlugin(Star):
         id_cfg = self.config.get("identity", {})
         adv_cfg = self.config.get("advanced", {})
 
-        self.ws_url: str = conn_cfg.get("maibot_ws_url") or self.config.get("maibot_ws_url", "ws://127.0.0.1:18040/ws")
-        self.api_key: str = conn_cfg.get("maibot_api_key") or self.config.get("maibot_api_key", "astrbot_hijack")
-        self.timeout: int = int(conn_cfg.get("maibot_timeout") or self.config.get("maibot_timeout", 120))
-        self.bot_user_id: str = id_cfg.get("maibot_bot_id") or self.config.get("maibot_bot_id", "astrbot")
-        self.bot_nickname: str = id_cfg.get("maibot_bot_nickname") or self.config.get("maibot_bot_nickname", "AstrBot")
+        def _get_cfg(new_key: str, old_key: str, default):
+            """优先从新结构获取，不存在则从旧结构获取，最后使用默认值。"""
+            if new_key in conn_cfg or new_key in id_cfg or new_key in adv_cfg:
+                # 确定新配置属于哪个分组
+                if new_key in ("maibot_ws_url", "maibot_api_key", "maibot_timeout"):
+                    return conn_cfg.get(new_key, default)
+                elif new_key in ("maibot_bot_id", "maibot_bot_nickname"):
+                    return id_cfg.get(new_key, default)
+                else:
+                    return adv_cfg.get(new_key, default)
+            return self.config.get(old_key, default)
+
+        self.ws_url: str = _get_cfg("maibot_ws_url", "maibot_ws_url", "ws://127.0.0.1:18040/ws")
+        self.api_key: str = _get_cfg("maibot_api_key", "maibot_api_key", "astrbot_hijack")
+        self.timeout: int = int(_get_cfg("maibot_timeout", "maibot_timeout", 120))
+        self.bot_user_id: str = _get_cfg("maibot_bot_id", "maibot_bot_id", "astrbot")
+        self.bot_nickname: str = _get_cfg("maibot_bot_nickname", "maibot_bot_nickname", "AstrBot")
 
         # 高级配置
         self.reconnect_interval: int = int(adv_cfg.get("reconnect_interval", 5))
@@ -205,7 +217,8 @@ class MaiBotHijackPlugin(Star):
         if umo in self._session_map:
             self._session_map.move_to_end(umo)
         self._session_map[umo] = event
-        while len(self._session_map) > _SESSION_MAP_MAX:
+        max_size = getattr(self, "max_session_cache", _DEFAULT_SESSION_MAP_MAX)
+        while len(self._session_map) > max_size:
             self._session_map.popitem(last=False)
 
     # ── 主动消息路由 ─────────────────────────────────────────────────────────

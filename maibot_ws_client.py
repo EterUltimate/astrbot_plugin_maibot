@@ -69,6 +69,8 @@ class _PlatformChannel:
         keepalive_interval: int = 20,
         bot_user_id: str = "astrbot",
         bot_nickname: str = "AstrBot",
+        reconnect_interval: int = 5,
+        debug_mode: bool = False,
     ) -> None:
         self.ws_url = ws_url.rstrip("/")
         self.api_key = api_key
@@ -77,6 +79,8 @@ class _PlatformChannel:
         self.keepalive_interval = keepalive_interval
         self.bot_user_id = bot_user_id
         self.bot_nickname = bot_nickname
+        self.reconnect_interval = reconnect_interval
+        self.debug_mode = debug_mode
 
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._connected: bool = False
@@ -191,12 +195,19 @@ class _PlatformChannel:
         finally:
             self._connected = False
 
+    def _log_debug(self, message: str) -> None:
+        """根据 debug_mode 输出调试日志。"""
+        if self.debug_mode:
+            logger.info(message)
+        else:
+            logger.debug(message)
+
     async def _dispatch(self, msg: dict) -> None:
         """根据消息类型分发处理。"""
         msg_type = msg.get("type", "")
 
         if msg_type == "sys_ack":
-            logger.debug(
+            self._log_debug(
                 f"[MaiBot/{self.platform}] ACK: "
                 f"{msg.get('meta', {}).get('acked_msg_id', '?')}"
             )
@@ -274,12 +285,13 @@ class _PlatformChannel:
                     break
                 try:
                     await asyncio.wait_for(self._ws.ping(), timeout=10.0)
-                    logger.debug(f"[MaiBot/{self.platform}] Keepalive OK")
+                    self._log_debug(f"[MaiBot/{self.platform}] Keepalive OK")
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    logger.warning(f"[MaiBot/{self.platform}] Keepalive 失败: {e}，尝试重连…")
+                    logger.warning(f"[MaiBot/{self.platform}] Keepalive 失败: {e}，{self.reconnect_interval}秒后重连…")
                     self._connected = False
+                    await asyncio.sleep(self.reconnect_interval)
                     try:
                         await self.ensure_connected()
                     except Exception as re_err:
@@ -620,6 +632,8 @@ class MaiBotWSClient:
                     keepalive_interval=self.keepalive_interval,
                     bot_user_id=self.bot_user_id,
                     bot_nickname=self.bot_nickname,
+                    reconnect_interval=self.reconnect_interval,
+                    debug_mode=self.debug_mode,
                 )
                 ch._proactive_handler = self._proactive_handler
                 ch._tool_call_handler = self._tool_call_handler
