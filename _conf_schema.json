@@ -21,7 +21,7 @@
             "maibot_timeout": {
                 "title": "响应超时",
                 "description": "等待 MaiBot 回复的最大秒数",
-                "type": "integer",
+                "type": "int",
                 "default": 120,
                 "min": 10,
                 "max": 600,
@@ -63,7 +63,7 @@
             "reconnect_interval": {
                 "title": "重连间隔",
                 "description": "WebSocket 断线后自动重连的等待秒数",
-                "type": "integer",
+                "type": "int",
                 "default": 5,
                 "min": 1,
                 "max": 60,
