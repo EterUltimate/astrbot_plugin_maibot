@@ -39,11 +39,12 @@ _DEFAULT_SESSION_MAP_MAX = 500
 @dataclass
 class SessionInfo:
     """会话信息的最小表示，用于主动消息路由。
-    
+
     避免缓存完整的 AstrMessageEvent 对象，防止：
     - 对象生命周期过长导致资源占用
     - 上下文（如连接）已失效但对象仍存在
     """
+
     unified_msg_origin: str
     platform: str
     message_type: str
@@ -51,7 +52,7 @@ class SessionInfo:
     # 弱引用到原始事件，仅在需要时用于发送消息
     # 使用 object 类型避免循环导入问题
     _event_ref: object = field(default=None, repr=False)
-    
+
     @classmethod
     def from_event(cls, event: AstrMessageEvent) -> SessionInfo:
         """从 AstrMessageEvent 创建 SessionInfo。"""
@@ -64,14 +65,14 @@ class SessionInfo:
             session_id=session_id,
             _event_ref=event,
         )
-    
+
     def get_event(self) -> AstrMessageEvent | None:
         """获取原始事件对象（如果仍可用）。"""
         return self._event_ref  # type: ignore
-    
+
     async def send(self, result) -> bool:
         """尝试发送消息到该会话。
-        
+
         Returns:
             bool: 是否发送成功
         """
@@ -89,6 +90,7 @@ class SessionInfo:
 # ---------------------------------------------------------------------------
 # UMO 解析工具
 # ---------------------------------------------------------------------------
+
 
 def parse_umo(umo: str) -> tuple[str, str, str]:
     """解析 AstrBot unified_msg_origin。
@@ -109,6 +111,7 @@ def parse_umo(umo: str) -> tuple[str, str, str]:
 # ---------------------------------------------------------------------------
 # 插件主体
 # ---------------------------------------------------------------------------
+
 
 @register(
     "maibot_hijack",
@@ -147,11 +150,17 @@ class MaiBotHijackPlugin(Star):
                     return adv_cfg.get(new_key, default)
             return self.config.get(old_key, default)
 
-        self.ws_url: str = _get_cfg("maibot_ws_url", "maibot_ws_url", "ws://127.0.0.1:18040/ws")
-        self.api_key: str = _get_cfg("maibot_api_key", "maibot_api_key", "astrbot_hijack")
+        self.ws_url: str = _get_cfg(
+            "maibot_ws_url", "maibot_ws_url", "ws://127.0.0.1:18040/ws"
+        )
+        self.api_key: str = _get_cfg(
+            "maibot_api_key", "maibot_api_key", "astrbot_hijack"
+        )
         self.timeout: int = int(_get_cfg("maibot_timeout", "maibot_timeout", 120))
         self.bot_user_id: str = _get_cfg("maibot_bot_id", "maibot_bot_id", "astrbot")
-        self.bot_nickname: str = _get_cfg("maibot_bot_nickname", "maibot_bot_nickname", "AstrBot")
+        self.bot_nickname: str = _get_cfg(
+            "maibot_bot_nickname", "maibot_bot_nickname", "AstrBot"
+        )
 
         # 高级配置
         self.reconnect_interval: int = int(adv_cfg.get("reconnect_interval", 5))
@@ -188,9 +197,7 @@ class MaiBotHijackPlugin(Star):
             masked_key = f"{self.api_key[:2]}****{self.api_key[-2:]}"
         else:
             masked_key = "****"
-        logger.info(
-            f"[MaiBot] 插件已加载 | WS: {self.ws_url} | API Key: {masked_key}"
-        )
+        logger.info(f"[MaiBot] 插件已加载 | WS: {self.ws_url} | API Key: {masked_key}")
 
     async def terminate(self):
         """插件卸载时清理资源。"""
@@ -304,16 +311,26 @@ class MaiBotHijackPlugin(Star):
         target_session: SessionInfo | None = None
         # 支持多种群聊消息类型命名
         group_msg_types = ["GroupMessage", "group_message", "Group"]
-        private_msg_types = ["FriendMessage", "PrivateMessage", "private_message", "Friend", "Private"]
-        
+        private_msg_types = [
+            "FriendMessage",
+            "PrivateMessage",
+            "private_message",
+            "Friend",
+            "Private",
+        ]
+
         if group_id:
             for msg_type in group_msg_types:
-                target_session = self._session_map.get(f"{platform}:{msg_type}:{group_id}")
+                target_session = self._session_map.get(
+                    f"{platform}:{msg_type}:{group_id}"
+                )
                 if target_session:
                     break
         if target_session is None and user_id:
             for msg_type in private_msg_types:
-                target_session = self._session_map.get(f"{platform}:{msg_type}:{user_id}")
+                target_session = self._session_map.get(
+                    f"{platform}:{msg_type}:{user_id}"
+                )
                 if target_session:
                     break
         if target_session is None:
@@ -325,22 +342,24 @@ class MaiBotHijackPlugin(Star):
             )
             return
 
-        logger.info(f"[MaiBot/{platform}] 路由主动消息 → {target_session.unified_msg_origin}")
+        logger.info(
+            f"[MaiBot/{platform}] 路由主动消息 → {target_session.unified_msg_origin}"
+        )
 
         # 尝试获取原始事件用于生成结果
         event = target_session.get_event()
         if event is None:
-            logger.warning(f"[MaiBot/{platform}] 会话 {target_session.unified_msg_origin} 的事件已失效")
+            logger.warning(
+                f"[MaiBot/{platform}] 会话 {target_session.unified_msg_origin} 的事件已失效"
+            )
             return
-        
+
         async for result in self._payload_to_results(event, payload):
             success = await target_session.send(result)
             if not success:
                 break
 
-    def _find_any_session_for_platform(
-        self, platform: str
-    ) -> SessionInfo | None:
+    def _find_any_session_for_platform(self, platform: str) -> SessionInfo | None:
         """在 session_map 中查找属于指定平台的最新会话（LRU 末尾即最新）。"""
         prefix = f"{platform}:"
         # 从最新（末尾）开始查找
@@ -360,6 +379,7 @@ class MaiBotHijackPlugin(Star):
     async def _seg_to_results(self, event: AstrMessageEvent, segment: dict):
         """递归将 Seg 转换为 AstrBot 消息结果（异步生成器）。"""
         import astrbot.core.message.components as Comp
+
         components = parse_segment_to_components(segment)
         for comp in components:
             if isinstance(comp, Comp.Plain):

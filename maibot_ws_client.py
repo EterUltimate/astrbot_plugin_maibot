@@ -41,13 +41,14 @@ def _strip_data_uri(data: str) -> str:
     """去除 base64 data URI 前缀，返回纯 base64 字符串。"""
     for prefix in _DATA_URI_PREFIXES:
         if data.startswith(prefix):
-            return data[len(prefix):]
+            return data[len(prefix) :]
     return data
 
 
 # ---------------------------------------------------------------------------
 # 单平台 WS 通道
 # ---------------------------------------------------------------------------
+
 
 class _PlatformChannel:
     """维护一条到 MaiBot 的 WebSocket 持久连接，对应特定的 platform 标识。
@@ -57,7 +58,9 @@ class _PlatformChannel:
     * ``ensure_connected`` 通过 ``_connect_lock`` 防止重复连接。
     * ``send_and_receive`` 通过 ``_request_lock`` 保证同一通道同一时刻
       只有一个请求-响应事务，避免多协程共享 ``_global_queue`` 时的消息混淆。
-    * ``_in_request`` 仅在 ``_request_lock`` 持有期间被读写，无竞态。
+    * 使用 ``_current_request_id`` 请求 ID 关联机制替代简单的布尔标志，
+      ``_dispatch`` 在持锁读取 ``_current_request_id`` 后判断消息归属，
+      避免跨协程状态位的时序问题。
     """
 
     def __init__(
@@ -86,17 +89,17 @@ class _PlatformChannel:
         self._connected: bool = False
         # 防止重复建连
         self._connect_lock = asyncio.Lock()
-        # 保证 send_and_receive 串行：同一通道同时只处理一个请求
-        self._request_lock = asyncio.Lock()
 
         self._listener_task: asyncio.Task | None = None
         self._keepalive_task: asyncio.Task | None = None
 
-        # 请求-响应关联机制：使用请求 ID 替代简单的 _in_request 标志
+        # 请求-响应关联机制：使用请求 ID 替代简单的布尔标志
         # 避免并发时消息分类错误（把响应当主动消息，或反之）
-        self._global_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=1000)  # 限制容量防止内存增长
+        self._global_queue: asyncio.Queue[dict] = asyncio.Queue(
+            maxsize=1000
+        )  # 限制容量防止内存增长
         self._current_request_id: str | None = None
-        self._request_lock = asyncio.Lock()
+        self._request_lock = asyncio.Lock()  # 保证 send_and_receive 串行
 
         # 后台任务追踪，防止任务悬挂
         self._background_tasks: set[asyncio.Task] = set()
@@ -179,7 +182,7 @@ class _PlatformChannel:
         self._connected = False
         # 取消所有后台任务（包括监听、心跳和 dispatch 创建的任务）
         await self._cancel_background_tasks()
-        
+
         for task in (self._keepalive_task, self._listener_task):
             if task and not task.done():
                 task.cancel()
@@ -236,7 +239,6 @@ class _PlatformChannel:
     async def _dispatch(self, msg: dict) -> None:
         """根据消息类型分发处理。"""
         msg_type = msg.get("type", "")
-        msg_id = msg.get("msg_id", "") or msg.get("meta", {}).get("acked_msg_id", "")
 
         if msg_type == "sys_ack":
             self._log_debug(
@@ -260,7 +262,7 @@ class _PlatformChannel:
             # 使用请求 ID 关联机制，替代简单的 _in_request 标志
             async with self._request_lock:
                 is_response = self._current_request_id is not None
-            
+
             if is_response:
                 # 是当前请求的响应，放入队列
                 try:
@@ -282,7 +284,9 @@ class _PlatformChannel:
         call_id = msg.get("call_id", "")
         tool_name = msg.get("name", "")
         tool_args = msg.get("args", {})
-        logger.info(f"[MaiBot/{self.platform}] tool_call: {tool_name}(call_id={call_id})")
+        logger.info(
+            f"[MaiBot/{self.platform}] tool_call: {tool_name}(call_id={call_id})"
+        )
 
         if self._tool_call_handler:
             try:
@@ -313,7 +317,9 @@ class _PlatformChannel:
             if self._proactive_handler:
                 await self._proactive_handler(msg, self.platform)
         except Exception as e:
-            logger.error(f"[MaiBot/{self.platform}] 主动消息处理出错: {e}", exc_info=True)
+            logger.error(
+                f"[MaiBot/{self.platform}] 主动消息处理出错: {e}", exc_info=True
+            )
 
     # ── 心跳 ─────────────────────────────────────────────────────────────────
 
@@ -329,7 +335,9 @@ class _PlatformChannel:
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    logger.warning(f"[MaiBot/{self.platform}] Keepalive 失败: {e}，{self.reconnect_interval}秒后重连…")
+                    logger.warning(
+                        f"[MaiBot/{self.platform}] Keepalive 失败: {e}，{self.reconnect_interval}秒后重连…"
+                    )
                     self._connected = False
                     await asyncio.sleep(self.reconnect_interval)
                     try:
@@ -468,7 +476,9 @@ class _PlatformChannel:
             self._current_request_id = request_id
             try:
                 await self._ws.send(json.dumps(envelope, ensure_ascii=False))
-                logger.debug(f"[MaiBot/{self.platform}] 消息已发送 (req_id={request_id})，等待回复…")
+                logger.debug(
+                    f"[MaiBot/{self.platform}] 消息已发送 (req_id={request_id})，等待回复…"
+                )
                 return await self._collect_responses()
             except websockets.exceptions.ConnectionClosed as e:
                 self._connected = False
@@ -490,7 +500,7 @@ class _PlatformChannel:
         images: list[str] | None = None,
     ) -> None:
         """透传消息到 MaiBot（仅上下文，不等待回复）。
-        
+
         使用 _request_lock 与 send_and_receive 串行化，保证消息时序稳定。
         """
         async with self._request_lock:
@@ -509,8 +519,12 @@ class _PlatformChannel:
                 images=images,
             )
             try:
-                await self._ws.send(json.dumps(self._build_envelope(payload), ensure_ascii=False))
-                logger.debug(f"[MaiBot/{self.platform}] 透传消息: user={user_id}, group={group_id}")
+                await self._ws.send(
+                    json.dumps(self._build_envelope(payload), ensure_ascii=False)
+                )
+                logger.debug(
+                    f"[MaiBot/{self.platform}] 透传消息: user={user_id}, group={group_id}"
+                )
             except Exception as e:
                 logger.debug(f"[MaiBot/{self.platform}] 透传失败: {e}")
 
@@ -574,6 +588,7 @@ class _PlatformChannel:
 # ---------------------------------------------------------------------------
 # 独立工具函数（模块级，可被多处复用）
 # ---------------------------------------------------------------------------
+
 
 def _segment_has_content(segment: dict) -> bool:
     """检查 Seg 是否含有可展示的内容。"""
@@ -642,6 +657,7 @@ def extract_text_from_segment(segment: dict) -> str:
 # ---------------------------------------------------------------------------
 # 多平台路由客户端（对外暴露）
 # ---------------------------------------------------------------------------
+
 
 class MaiBotWSClient:
     """多平台 MaiBot WS 路由客户端。

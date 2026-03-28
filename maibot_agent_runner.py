@@ -13,8 +13,10 @@ MaiBotAgentRunner — AstrBot Agent Runner 接入 MaiBot
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import sys
+import time
 import typing as T
 
 import astrbot.core.message.components as Comp
@@ -27,7 +29,11 @@ from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from astrbot.core.provider.register import llm_tools
 
-from .maibot_ws_client import MaiBotWSClient, parse_segment_to_components
+from .maibot_ws_client import (
+    MaiBotWSClient,
+    parse_segment_to_components,
+    extract_text_from_segment,
+)
 
 if sys.version_info >= (3, 12):
     from typing import override
@@ -52,7 +58,9 @@ class MaiBotAgentRunner(BaseAgentRunner[TContext]):
     _CLIENT_MAX_IDLE_SECONDS: T.ClassVar[int] = 3600  # 1小时无使用则回收
 
     @classmethod
-    def get_ws_client(cls, ws_url: str = "", api_key: str = "") -> MaiBotWSClient | None:
+    def get_ws_client(
+        cls, ws_url: str = "", api_key: str = ""
+    ) -> MaiBotWSClient | None:
         """获取缓存的 WS 客户端（供外部调试使用）。"""
         if ws_url and api_key:
             return cls._ws_clients.get(f"{ws_url}|{api_key}")
@@ -61,7 +69,7 @@ class MaiBotAgentRunner(BaseAgentRunner[TContext]):
     @classmethod
     async def cleanup_idle_clients(cls) -> None:
         """清理长时间未使用的 WS 客户端，防止内存泄漏。"""
-        now = asyncio.get_event_loop().time()
+        now = time.monotonic()
         to_remove = []
         for key, last_used in list(cls._client_last_used.items()):
             if now - last_used > cls._CLIENT_MAX_IDLE_SECONDS:
@@ -80,7 +88,7 @@ class MaiBotAgentRunner(BaseAgentRunner[TContext]):
     @classmethod
     def _update_client_usage(cls, key: str) -> None:
         """更新客户端最后使用时间。"""
-        cls._client_last_used[key] = asyncio.get_event_loop().time()
+        cls._client_last_used[key] = time.monotonic()
 
     @override
     async def reset(
@@ -108,17 +116,19 @@ class MaiBotAgentRunner(BaseAgentRunner[TContext]):
             raise ValueError("MaiBot WebSocket URL 不能为空，请在 AstrBot 配置中填写。")
 
         client_key = f"{self.ws_url}|{self.api_key}"
-        
+
         # 清理空闲客户端
-        await cls.cleanup_idle_clients()
-        
+        await MaiBotAgentRunner.cleanup_idle_clients()
+
         if client_key in MaiBotAgentRunner._ws_clients:
             self.ws_client = MaiBotAgentRunner._ws_clients[client_key]
-            cls._update_client_usage(client_key)
+            MaiBotAgentRunner._update_client_usage(client_key)
             logger.debug("[MaiBot] 复用已有 WS 客户端")
         else:
             # 配置键名统一：优先使用 maibot_bot_id，兼容 maibot_bot_qq
-            bot_user_id = cfg.get("maibot_bot_id") or cfg.get("maibot_bot_qq") or "astrbot"
+            bot_user_id = (
+                cfg.get("maibot_bot_id") or cfg.get("maibot_bot_qq") or "astrbot"
+            )
             bot_nickname = cfg.get("maibot_bot_nickname") or "AstrBot"
             self.ws_client = MaiBotWSClient(
                 ws_url=self.ws_url,
@@ -128,7 +138,7 @@ class MaiBotAgentRunner(BaseAgentRunner[TContext]):
                 bot_nickname=bot_nickname,
             )
             MaiBotAgentRunner._ws_clients[client_key] = self.ws_client
-            cls._update_client_usage(client_key)
+            MaiBotAgentRunner._update_client_usage(client_key)
             logger.info("[MaiBot] 创建新 WS 客户端")
 
         self.ws_client.set_tool_call_handler(self._handle_tool_call)
@@ -167,7 +177,7 @@ class MaiBotAgentRunner(BaseAgentRunner[TContext]):
         self, max_step: int = 30
     ) -> T.AsyncGenerator[AgentResponse, None]:
         """执行直到完成或达到最大步数限制。
-        
+
         Args:
             max_step: 最大执行步数，防止无限循环
         """
@@ -176,7 +186,7 @@ class MaiBotAgentRunner(BaseAgentRunner[TContext]):
             step_count += 1
             async for resp in self.step():
                 yield resp
-        
+
         if step_count >= max_step and not self.done():
             err_msg = f"MaiBot 执行超过最大步数限制 ({max_step})，强制终止"
             logger.warning(f"[MaiBot] {err_msg}")
@@ -292,7 +302,7 @@ class MaiBotAgentRunner(BaseAgentRunner[TContext]):
 
     async def _handle_tool_call(self, tool_name: str, tool_args: dict) -> str:
         """执行 MaiBot 请求的 AstrBot 工具。
-        
+
         支持同步和异步 handler，自动检测并正确调用。
         """
         func_tool = llm_tools.get_func(tool_name)
@@ -304,7 +314,7 @@ class MaiBotAgentRunner(BaseAgentRunner[TContext]):
         try:
             sig = inspect.signature(func_tool.handler)
             first_param = next(iter(sig.parameters), None)
-            
+
             # 准备参数
             if first_param == "event":
                 event = None
@@ -314,7 +324,7 @@ class MaiBotAgentRunner(BaseAgentRunner[TContext]):
                 call_args = (event,)
             else:
                 call_args = ()
-            
+
             # 检测 handler 是同步还是异步
             handler = func_tool.handler
             if inspect.iscoroutinefunction(handler):
@@ -325,16 +335,15 @@ class MaiBotAgentRunner(BaseAgentRunner[TContext]):
                     result = await handler(**tool_args)
             else:
                 # 同步 handler，在线程池中执行避免阻塞
-                import asyncio
                 if call_args:
-                    result = await asyncio.get_event_loop().run_in_executor(
+                    result = await asyncio.get_running_loop().run_in_executor(
                         None, lambda: handler(call_args[0], **tool_args)
                     )
                 else:
-                    result = await asyncio.get_event_loop().run_in_executor(
+                    result = await asyncio.get_running_loop().run_in_executor(
                         None, lambda: handler(**tool_args)
                     )
-            
+
             return str(result) if result is not None else "Tool executed (no output)."
         except Exception as e:
             logger.error(f"[MaiBot] 工具 '{tool_name}' 执行出错: {e}", exc_info=True)
@@ -375,6 +384,7 @@ class MaiBotAgentRunner(BaseAgentRunner[TContext]):
 # ---------------------------------------------------------------------------
 # 模块级工具函数
 # ---------------------------------------------------------------------------
+
 
 def _parse_umo(umo: str) -> tuple[str, str, str]:
     """解析 unified_msg_origin，返回 (platform, message_type, session_id)。"""
