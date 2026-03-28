@@ -1,4 +1,4 @@
-name: astrbot_plugin_maibot
+name: astrbot_plugin_maibot_hijack
 display_name: MaiBot Adapter
 desc: |
   将 AstrBot 作为消息聚合平台接入 MaiBot。
@@ -25,3 +25,22 @@ support_platforms:
   - satori
   - misskey
   - line
+
+# 配置页设置
+config_page:
+  title: "MaiBot Adapter 配置"
+  description: "配置 AstrBot 与 MaiBot 的连接参数"
+  icon: "🔗"
+  groups:
+    - key: "connection"
+      icon: "🔌"
+      title: "连接配置"
+      description: "WebSocket 连接和认证参数"
+    - key: "identity"
+      icon: "🤖"
+      title: "身份配置"
+      description: "Bot 在 MaiBot 侧的标识信息"
+    - key: "advanced"
+      icon: "⚙️"
+      title: "高级配置"
+      description: "高级参数，一般保持默认"

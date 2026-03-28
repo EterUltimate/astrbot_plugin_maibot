@@ -1,32 +1,100 @@
 {
-    "maibot_ws_url": {
-        "title": "MaiBot WebSocket 地址",
-        "description": "MaiBot API-Server 的 WebSocket 端点，例如 ws://127.0.0.1:18040/ws",
-        "type": "string",
-        "default": "ws://127.0.0.1:18040/ws"
+    "connection": {
+        "title": "🔌 连接配置",
+        "description": "MaiBot API-Server 连接参数",
+        "type": "object",
+        "items": {
+            "maibot_ws_url": {
+                "title": "WebSocket 地址",
+                "description": "MaiBot API-Server 的 WebSocket 端点地址",
+                "type": "string",
+                "default": "ws://127.0.0.1:18040/ws",
+                "hint": "格式：ws://host:port/path 或 wss://host:port/path"
+            },
+            "maibot_api_key": {
+                "title": "API Key",
+                "description": "连接认证密钥，需与 MaiBot 服务端配置一致",
+                "type": "string",
+                "default": "astrbot_hijack",
+                "hint": "在 MaiBot 配置文件中查看 api_key 字段"
+            },
+            "maibot_timeout": {
+                "title": "响应超时",
+                "description": "等待 MaiBot 回复的最大秒数",
+                "type": "integer",
+                "default": 120,
+                "min": 10,
+                "max": 600,
+                "slider": {
+                    "min": 10,
+                    "max": 300,
+                    "step": 10
+                },
+                "hint": "单位：秒，建议 60-180 秒"
+            }
+        }
     },
-    "maibot_api_key": {
-        "title": "MaiBot API Key",
-        "description": "连接 MaiBot API-Server 时使用的认证 Key，需与 MaiBot 服务端配置一致",
-        "type": "string",
-        "default": "astrbot_hijack"
+    "identity": {
+        "title": "🤖 身份配置",
+        "description": "AstrBot 在 MaiBot 侧的身份标识",
+        "type": "object",
+        "items": {
+            "maibot_bot_id": {
+                "title": "Bot 用户 ID",
+                "description": "AstrBot 在 MaiBot 系统中的用户标识",
+                "type": "string",
+                "default": "astrbot",
+                "hint": "用于 message_info.user_info.user_id 字段"
+            },
+            "maibot_bot_nickname": {
+                "title": "Bot 昵称",
+                "description": "AstrBot 在 MaiBot 系统中的显示名称",
+                "type": "string",
+                "default": "AstrBot",
+                "hint": "用于 message_info.user_info.user_nickname 字段"
+            }
+        }
     },
-    "maibot_timeout": {
-        "title": "响应超时（秒）",
-        "description": "等待 MaiBot 回复的最大秒数，超时后向用户返回提示",
-        "type": "integer",
-        "default": 120
-    },
-    "maibot_bot_id": {
-        "title": "Bot 用户 ID",
-        "description": "AstrBot 在 MaiBot 侧的用户标识，用于填充 message_info.user_info.user_id",
-        "type": "string",
-        "default": "astrbot"
-    },
-    "maibot_bot_nickname": {
-        "title": "Bot 昵称",
-        "description": "AstrBot 在 MaiBot 侧的显示昵称",
-        "type": "string",
-        "default": "AstrBot"
+    "advanced": {
+        "title": "⚙️ 高级配置",
+        "description": "高级参数，一般保持默认即可",
+        "type": "object",
+        "items": {
+            "reconnect_interval": {
+                "title": "重连间隔",
+                "description": "WebSocket 断线后自动重连的等待秒数",
+                "type": "integer",
+                "default": 5,
+                "min": 1,
+                "max": 60,
+                "slider": {
+                    "min": 1,
+                    "max": 30,
+                    "step": 1
+                },
+                "hint": "单位：秒"
+            },
+            "max_session_cache": {
+                "title": "会话缓存上限",
+                "description": "主动消息路由的会话缓存最大数量",
+                "type": "integer",
+                "default": 500,
+                "min": 100,
+                "max": 2000,
+                "slider": {
+                    "min": 100,
+                    "max": 1000,
+                    "step": 100
+                },
+                "hint": "LRU 淘汰策略，超出上限时自动清理旧会话"
+            },
+            "debug_mode": {
+                "title": "调试模式",
+                "description": "启用后输出详细日志，用于排查问题",
+                "type": "boolean",
+                "default": false,
+                "hint": "生产环境建议关闭"
+            }
+        }
     }
 }

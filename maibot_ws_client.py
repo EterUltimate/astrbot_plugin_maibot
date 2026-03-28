@@ -589,6 +589,8 @@ class MaiBotWSClient:
         keepalive_interval: int = 20,
         bot_user_id: str = "astrbot",
         bot_nickname: str = "AstrBot",
+        reconnect_interval: int = 5,
+        debug_mode: bool = False,
     ) -> None:
         self.ws_url = ws_url
         self.api_key = api_key
@@ -596,6 +598,8 @@ class MaiBotWSClient:
         self.keepalive_interval = keepalive_interval
         self.bot_user_id = bot_user_id
         self.bot_nickname = bot_nickname
+        self.reconnect_interval = reconnect_interval
+        self.debug_mode = debug_mode
 
         self._channels: dict[str, _PlatformChannel] = {}
         self._channel_lock = asyncio.Lock()

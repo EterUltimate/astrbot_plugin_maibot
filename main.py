@@ -77,11 +77,23 @@ class MaiBotHijackPlugin(Star):
         super().__init__(context)
         self.config = config or {}
 
-        self.ws_url: str = self.config.get("maibot_ws_url", "ws://127.0.0.1:18040/ws")
-        self.api_key: str = self.config.get("maibot_api_key", "astrbot_hijack")
-        self.timeout: int = int(self.config.get("maibot_timeout", 120))
-        self.bot_user_id: str = self.config.get("maibot_bot_id", "astrbot")
-        self.bot_nickname: str = self.config.get("maibot_bot_nickname", "AstrBot")
+        # 支持新旧两种配置结构
+        # 新结构：config = {"connection": {...}, "identity": {...}, "advanced": {...}}
+        # 旧结构：config = {"maibot_ws_url": ..., ...}
+        conn_cfg = self.config.get("connection", {})
+        id_cfg = self.config.get("identity", {})
+        adv_cfg = self.config.get("advanced", {})
+
+        self.ws_url: str = conn_cfg.get("maibot_ws_url") or self.config.get("maibot_ws_url", "ws://127.0.0.1:18040/ws")
+        self.api_key: str = conn_cfg.get("maibot_api_key") or self.config.get("maibot_api_key", "astrbot_hijack")
+        self.timeout: int = int(conn_cfg.get("maibot_timeout") or self.config.get("maibot_timeout", 120))
+        self.bot_user_id: str = id_cfg.get("maibot_bot_id") or self.config.get("maibot_bot_id", "astrbot")
+        self.bot_nickname: str = id_cfg.get("maibot_bot_nickname") or self.config.get("maibot_bot_nickname", "AstrBot")
+
+        # 高级配置
+        self.reconnect_interval: int = int(adv_cfg.get("reconnect_interval", 5))
+        self.max_session_cache: int = int(adv_cfg.get("max_session_cache", 500))
+        self.debug_mode: bool = bool(adv_cfg.get("debug_mode", False))
 
         self.ws_client = MaiBotWSClient(
             ws_url=self.ws_url,
@@ -89,6 +101,8 @@ class MaiBotHijackPlugin(Star):
             timeout=self.timeout,
             bot_user_id=self.bot_user_id,
             bot_nickname=self.bot_nickname,
+            reconnect_interval=self.reconnect_interval,
+            debug_mode=self.debug_mode,
         )
 
         # LRU session 映射：unified_msg_origin → AstrMessageEvent
