@@ -91,7 +91,7 @@
             "debug_mode": {
                 "title": "调试模式",
                 "description": "启用后输出详细日志，用于排查问题",
-                "type": "boolean",
+                "type": "bool",
                 "default": false,
                 "hint": "生产环境建议关闭"
             }
