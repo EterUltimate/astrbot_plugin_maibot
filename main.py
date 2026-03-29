@@ -8,15 +8,17 @@ MaiBot 专注于 LLM 回复，不感知底层平台差异。
 
 消息流
 ------
-用户消息 → AstrBot → 本插件 → MaiBot（platform = 真实来源平台）
+用户消息 → AstrBot → 本插件 → MaiBot（platform = 平台类型名，如 aiocqhttp）
 MaiBot 回复 → 本插件（按 platform 路由） → AstrBot → 原消息平台 → 用户
 
 平台标识
 --------
 * 发向 MaiBot 的 message_info.platform / message_dim.platform
-  均设为真实平台标识（从 AstrBot unified_msg_origin 解析）。
-* MaiBot 回复时原样回传 platform，插件据此找到对应 AstrBot 会话并回复。
-* 每个不同的平台标识对应一条独立的 WS 持久连接。
+  使用 event.get_platform_name()（平台类型名，如 aiocqhttp、discord）。
+* AstrBot 内部 unified_msg_origin 的第一段是 platform_meta.id（用户自定义实例标识），
+  与 platform_meta.name（平台类型名）可能不同。
+* 主动消息路由通过 SessionInfo.platform_name 匹配，不再依赖 UMO 字符串拼接。
+* 每个不同的平台类型对应一条独立的 WS 持久连接。
 """
 
 from __future__ import annotations
@@ -47,6 +49,7 @@ class SessionInfo:
 
     unified_msg_origin: str
     platform: str
+    platform_name: str = ""  # MaiBot 识别的平台类型名（如 aiocqhttp）
     message_type: str
     session_id: str
     # 弱引用到原始事件，仅在需要时用于发送消息
@@ -54,13 +57,14 @@ class SessionInfo:
     _event_ref: object = field(default=None, repr=False)
 
     @classmethod
-    def from_event(cls, event: AstrMessageEvent) -> SessionInfo:
+    def from_event(cls, event: AstrMessageEvent, platform_name: str = "") -> SessionInfo:
         """从 AstrMessageEvent 创建 SessionInfo。"""
         umo = event.unified_msg_origin
         platform, msg_type, session_id = parse_umo(umo)
         return cls(
             unified_msg_origin=umo,
             platform=platform,
+            platform_name=platform_name or event.get_platform_name(),
             message_type=msg_type,
             session_id=session_id,
             _event_ref=event,
@@ -217,15 +221,19 @@ class MaiBotHijackPlugin(Star):
         if not text and not event.message_obj.message:
             return
 
-        # 阻止 AstrBot 默认 LLM 处理
-        event.stop_event()
+        # 阻止 AstrBot 默认 LLM 处理（不能用 stop_event，因为 yield 后会被 set_result 覆盖）
+        event.should_call_llm(False)
+        event.continue_event()
 
         umo = event.unified_msg_origin
-        platform, message_type, raw_session_id = parse_umo(umo)
+        platform_id, message_type, raw_session_id = parse_umo(umo)
+        # platform_name 是 MaiBot 能识别的平台类型名（如 aiocqhttp, discord）
+        # platform_id 是 AstrBot 内部的适配器实例唯一标识（用户自定义）
+        platform_name = event.get_platform_name()
         is_group = "group" in message_type.lower()
 
-        # 更新 LRU session 映射
-        self._update_session_map(umo, event)
+        # 更新 LRU session 映射（同时记录 platform_name 用于主动消息路由）
+        self._update_session_map(umo, event, platform_name)
 
         user_id = str(event.get_sender_id() or raw_session_id)
         user_nickname = event.get_sender_name() or user_id
@@ -251,13 +259,13 @@ class MaiBotHijackPlugin(Star):
                     images.append(comp.base64)
 
         logger.info(
-            f"[MaiBot/{platform}] 消息来自 {user_nickname}({user_id}), "
+            f"[MaiBot/{platform_name}] 消息来自 {user_nickname}({user_id}), "
             f"group={ws_group_id}, text='{text[:30]}'"
         )
 
         try:
             responses = await self.ws_client.send_and_receive(
-                platform=platform,
+                platform=platform_name,
                 text=text,
                 user_id=ws_user_id,
                 user_nickname=ws_user_nickname,
@@ -269,7 +277,7 @@ class MaiBotHijackPlugin(Star):
             yield event.plain_result("MaiBot 请求超时，请稍后再试。")
             return
         except Exception as e:
-            logger.error(f"[MaiBot/{platform}] 处理消息出错: {e}", exc_info=True)
+            logger.error(f"[MaiBot/{platform_name}] 处理消息出错: {e}", exc_info=True)
             yield event.plain_result(f"MaiBot 出错：{e}")
             return
 
@@ -279,12 +287,12 @@ class MaiBotHijackPlugin(Star):
 
     # ── session 管理 ─────────────────────────────────────────────────────────
 
-    def _update_session_map(self, umo: str, event: AstrMessageEvent) -> None:
+    def _update_session_map(self, umo: str, event: AstrMessageEvent, platform_name: str = "") -> None:
         """以 LRU 策略更新 session 映射，超出上限时淘汰最旧条目。"""
         if umo in self._session_map:
             self._session_map.move_to_end(umo)
         # 保存 SessionInfo 而非完整事件对象
-        self._session_map[umo] = SessionInfo.from_event(event)
+        self._session_map[umo] = SessionInfo.from_event(event, platform_name)
         max_size = getattr(self, "max_session_cache", _DEFAULT_SESSION_MAP_MAX)
         while len(self._session_map) > max_size:
             self._session_map.popitem(last=False)
@@ -294,7 +302,8 @@ class MaiBotHijackPlugin(Star):
     async def _handle_proactive_message(self, msg: dict, platform: str) -> None:
         """处理 MaiBot 主动推送的消息，按 platform 路由回对应 AstrBot 会话。
 
-        路由优先级：精确群聊 UMO → 精确私聊 UMO → 该平台任意会话。
+        platform 参数是 MaiBot 识别的平台类型名（如 aiocqhttp）。
+        路由策略：按 platform_name 精确匹配 session_map 中的会话。
         """
         payload = msg.get("payload", {})
         if not payload:
@@ -320,21 +329,15 @@ class MaiBotHijackPlugin(Star):
         ]
 
         if group_id:
-            for msg_type in group_msg_types:
-                target_session = self._session_map.get(
-                    f"{platform}:{msg_type}:{group_id}"
-                )
-                if target_session:
-                    break
+            target_session = self._find_session_by_platform_and_id(
+                platform, group_id, group_msg_types
+            )
         if target_session is None and user_id:
-            for msg_type in private_msg_types:
-                target_session = self._session_map.get(
-                    f"{platform}:{msg_type}:{user_id}"
-                )
-                if target_session:
-                    break
+            target_session = self._find_session_by_platform_and_id(
+                platform, user_id, private_msg_types
+            )
         if target_session is None:
-            target_session = self._find_any_session_for_platform(platform)
+            target_session = self._find_any_session_for_platform_name(platform)
 
         if target_session is None:
             logger.warning(
@@ -359,13 +362,21 @@ class MaiBotHijackPlugin(Star):
             if not success:
                 break
 
-    def _find_any_session_for_platform(self, platform: str) -> SessionInfo | None:
-        """在 session_map 中查找属于指定平台的最新会话（LRU 末尾即最新）。"""
-        prefix = f"{platform}:"
+    def _find_session_by_platform_and_id(
+        self, platform_name: str, target_id: str, msg_types: list[str]
+    ) -> SessionInfo | None:
+        """按 platform_name 和群号/用户 ID 在 session_map 中查找会话。"""
+        for umo, session in self._session_map.items():
+            if session.platform_name == platform_name and session.session_id == target_id:
+                return session
+        return None
+
+    def _find_any_session_for_platform_name(self, platform_name: str) -> SessionInfo | None:
+        """查找属于指定 platform_name 的最新会话（LRU 末尾即最新）。"""
         # 从最新（末尾）开始查找
-        for umo in reversed(self._session_map):
-            if umo.startswith(prefix):
-                return self._session_map[umo]
+        for session in reversed(self._session_map.values()):
+            if session.platform_name == platform_name:
+                return session
         return None
 
     # ── payload → AstrBot 结果 ───────────────────────────────────────────────
