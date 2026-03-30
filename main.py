@@ -57,7 +57,9 @@ class SessionInfo:
     _event_ref: object = field(default=None, repr=False)
 
     @classmethod
-    def from_event(cls, event: AstrMessageEvent, platform_name: str = "") -> SessionInfo:
+    def from_event(
+        cls, event: AstrMessageEvent, platform_name: str = ""
+    ) -> SessionInfo:
         """从 AstrMessageEvent 创建 SessionInfo。"""
         umo = event.unified_msg_origin
         platform, msg_type, session_id = parse_umo(umo)
@@ -287,7 +289,9 @@ class MaiBotHijackPlugin(Star):
 
     # ── session 管理 ─────────────────────────────────────────────────────────
 
-    def _update_session_map(self, umo: str, event: AstrMessageEvent, platform_name: str = "") -> None:
+    def _update_session_map(
+        self, umo: str, event: AstrMessageEvent, platform_name: str = ""
+    ) -> None:
         """以 LRU 策略更新 session 映射，超出上限时淘汰最旧条目。"""
         if umo in self._session_map:
             self._session_map.move_to_end(umo)
@@ -367,11 +371,16 @@ class MaiBotHijackPlugin(Star):
     ) -> SessionInfo | None:
         """按 platform_name 和群号/用户 ID 在 session_map 中查找会话。"""
         for umo, session in self._session_map.items():
-            if session.platform_name == platform_name and session.session_id == target_id:
+            if (
+                session.platform_name == platform_name
+                and session.session_id == target_id
+            ):
                 return session
         return None
 
-    def _find_any_session_for_platform_name(self, platform_name: str) -> SessionInfo | None:
+    def _find_any_session_for_platform_name(
+        self, platform_name: str
+    ) -> SessionInfo | None:
         """查找属于指定 platform_name 的最新会话（LRU 末尾即最新）。"""
         # 从最新（末尾）开始查找
         for session in reversed(self._session_map.values()):
